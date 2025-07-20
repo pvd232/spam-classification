@@ -8,9 +8,11 @@ from nltk.tokenize import wordpunct_tokenize
 from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 import os
+import time
 from math import log
 import statistics
 import numpy as np
+import matplotlib.pyplot as plt
 
 s_dir, h_dir = os.path.join(os.curdir, "enron1/spam"), os.path.join(
     os.curdir, "enron1/ham"
@@ -448,12 +450,15 @@ def test(
             wrong += 1
     return right / (right + wrong) if (right + wrong) > 0 else 0.0
 
-def main():
+
+def run_experiments():
+    # Build vocab and corpora
     vocab, i_vocab = {}, {}
     spam_corp = tokenize(dir=s_dir, vocab=vocab, i_vocab=i_vocab, stop=s_stop)
     ham_corp = tokenize(dir=h_dir, vocab=vocab, i_vocab=i_vocab, stop=h_stop)
 
-    spam_counts_b = build_bow_vector(
+    # Build vectors
+    spam_flat = build_bow_vector(
         corp=spam_corp,
         idx2token=i_vocab,
         vocab=vocab,
@@ -461,7 +466,7 @@ def main():
         flat=True,
         median=False,
     )
-    ham_counts_b = build_bow_vector(
+    ham_flat = build_bow_vector(
         corp=ham_corp,
         idx2token=i_vocab,
         vocab=vocab,
@@ -469,16 +474,7 @@ def main():
         flat=True,
         median=False,
     )
-
-    naiive_bayes(
-        spam_counts=spam_counts_b,
-        ham_counts=ham_counts_b,
-        V=len(vocab),
-        vocab=vocab,
-        i_vocab=i_vocab,
-    )
-
-    s_cnt_knn_b = build_bow_vector(
+    spam_docs = build_bow_vector(
         corp=spam_corp,
         idx2token=i_vocab,
         vocab=vocab,
@@ -486,7 +482,7 @@ def main():
         flat=False,
         median=False,
     )
-    h_cnt_knn_b = build_bow_vector(
+    ham_docs = build_bow_vector(
         corp=ham_corp,
         idx2token=i_vocab,
         vocab=vocab,
@@ -494,40 +490,94 @@ def main():
         flat=False,
         median=False,
     )
-    train_spam_mat = np.array(s_cnt_knn_b)
-    train_ham_mat = np.array(h_cnt_knn_b)
 
-    labels = [1] * len(spam_corp) + [0] * len(ham_corp)
+    train_spam_mat = np.array(spam_docs)
+    train_ham_mat = np.array(ham_docs)
+    labels = [1] * len(spam_docs) + [0] * len(ham_docs)
     mat_all = np.vstack([train_spam_mat, train_ham_mat])
 
-    # k_NN brute force
-    k_NN(
-        vocab=vocab,
-        i_vocab=i_vocab,
-        model="nn",
-        p=1,
-        spam_count=train_spam_mat,
-        ham_count=train_ham_mat,
-    )
-
-    # k_NN kd tree
+    # Build KD-tree and decision tree models
     kd_root = build_kdtree(points=mat_all, labels=labels)
-    k_NN(
-        vocab=vocab,
-        i_vocab=i_vocab,
-        model="kd_nn",
-        p=1,
-        spam_count=train_spam_mat,
-        ham_count=train_ham_mat,
-        root=kd_root,
-    )
+    dt_random_root = fit_median_tree(mat_all, labels, random_split=True)
+    dt_nonrand_root = fit_median_tree(mat_all, labels, random_split=False)
 
-    # Decision tree
-    random_root = fit_median_tree(mat_all, labels, random_split=True)
-    nonrandom_root = fit_median_tree(mat_all, labels, random_split=False)
-    median_tree(vocab=vocab, i_vocab=i_vocab, model="tree", root=random_root)
-    median_tree(vocab=vocab, i_vocab=i_vocab, model="tree", root=nonrandom_root)
+    # Number of test samples
+    n_spam_test = s_len - s_stop
+    n_ham_test = h_len - h_stop
+
+    # Prepare experiments
+    experiments = []
+    # Naive Bayes
+    V = len(vocab)
+    alpha = 1
+    denom_spam = sum(spam_flat) + alpha * V
+    denom_ham = sum(ham_flat) + alpha * V
+    params_nb = {
+        "spam": {
+            "prior": s_stop / (s_len + h_len),
+            "theta": [(spam_flat[i] + alpha) / denom_spam for i in range(V)],
+        },
+        "ham": {
+            "prior": h_stop / (s_len + h_len),
+            "theta": [(ham_flat[i] + alpha) / denom_ham for i in range(V)],
+        },
+    }
+    experiments.append(("NB", "n_bayes", params_nb))
+
+    # k-NN brute force
+    for p in [1, 2, np.inf]:
+        experiments.append(
+            (
+                f"NN brute p={p}",
+                "nn",
+                {"spam": train_spam_mat, "ham": train_ham_mat, "p": p},
+            )
+        )
+    # k-NN KD-tree
+    for p in [1, 2, np.inf]:
+        experiments.append((f"NN kd p={p}", "kd_nn", {"root": kd_root, "p": p}))
+    # Decision trees
+    experiments.append(("DT random", "tree", {"root": dt_random_root}))
+    experiments.append(("DT nonrand", "tree", {"root": dt_nonrand_root}))
+
+    results = []
+    for name, model, params in experiments:
+        start = time.time()
+        spam_acc = test(
+            start=s_stop,
+            dir=s_dir,
+            vocab=vocab,
+            i_vocab=i_vocab,
+            params=params,
+            cls="spam",
+            model=model,
+        )
+        ham_acc = test(
+            start=h_stop,
+            dir=h_dir,
+            vocab=vocab,
+            i_vocab=i_vocab,
+            params=params,
+            cls="ham",
+            model=model,
+        )
+        runtime = time.time() - start
+        accuracy = (spam_acc * n_spam_test + ham_acc * n_ham_test) / (
+            n_spam_test + n_ham_test
+        )
+        results.append((name, accuracy, runtime))
+
+    # Plot runtime vs accuracy
+    fig, ax = plt.subplots()
+    for name, acc, rt in results:
+        ax.scatter(rt, acc)
+        ax.annotate(name, (rt, acc))
+    ax.set_xlabel("Runtime (s)")
+    ax.set_ylabel("Accuracy")
+    ax.set_title("Model Comparison: Runtime vs Accuracy")
+    plt.tight_layout()
+    plt.show()
 
 
 if __name__ == "__main__":
-    main()
+    run_experiments()
