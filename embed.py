@@ -9,6 +9,8 @@ from nltk.stem import WordNetLemmatizer
 from nltk.corpus import stopwords
 import os
 from math import log
+import statistics
+import numpy as np
 
 s_dir, h_dir = os.path.join(os.path.curdir, "enron1/spam"), os.path.join(
     os.path.curdir, "enron1/ham"
@@ -65,24 +67,44 @@ def build_index2token(
 
 
 def build_bow_vector(
-    corp: list[list[str]], idx2token: dict[int, str], vocab: dict[str, int], test: bool
-) -> list[int]:
-    sequence = []
-    for sample in corp:
-        for token in sample:
-            idx = vocab.get(token)
-            sequence.append(idx)
+    corp: list[list[str]],
+    idx2token: dict[int, str],
+    vocab: dict[str, int],
+    test: bool,
+    flat: bool,
+    median: bool,
+) -> list[int] | list[list[int]]:
+    V = len(idx2token)
 
-    vector = [0] * len(idx2token)
-    for token_idx in sequence:
-        if token_idx not in idx2token:
-            if not test:
-                raise ValueError("Wrong sequence index found!")
-            else:
-                continue
+    if flat:
+        # collapse all emails into one big sequence
+        flat_idxs = [
+            vocab[tok]
+            for sample in corp
+            for tok in sample
+            if vocab.get(tok) in idx2token
+        ]
+        vec = [0] * V
+        for idx in flat_idxs:
+            vec[idx] += 1
+        return vec
+
+    else:
+        # build one BOW vector per email
+        per_doc = []
+        for sample in corp:
+            vec = [0] * V
+            for tok in sample:
+                idx = vocab.get(tok)
+                if not test and idx is None:
+                    raise ValueError(f"Unknown token {tok}")
+                if idx is not None and idx < V:
+                    vec[idx] += 1
+            per_doc.append(vec)
+        if median:
+            return [statistics.median(doc[j] for doc in per_doc) for j in range(V)]
         else:
-            vector[token_idx] += 1
-    return vector
+            return per_doc
 
 
 def tok(
@@ -113,18 +135,40 @@ def tokenize(
     return corpus_tokens
 
 
-def classify(msg_vec: list[int], params) -> int:
-    scores = {}
-    for cls in ("spam", "ham"):
-        logp = log(params[cls]["prior"])
-        θ = params[cls]["theta"]
-        for i, count in enumerate(msg_vec):
-            if count > 0:
-                logp += count * log(θ[i])
-        scores[cls] = logp
+def classify(msg_vec: list[int], params: dict, model: str) -> int:
+    if model == "n_bayes":
+        scores = {}
+        for cls in ("spam", "ham"):
+            logp = log(params[cls]["prior"])
+            θ = params[cls]["theta"]
+            for i, count in enumerate(msg_vec):
+                if count > 0:
+                    logp += count * log(θ[i])
+            scores[cls] = logp
 
-    # pick the best
-    return int(max(scores, key=scores.get) == "spam")
+        # pick the best
+        return int(max(scores, key=scores.get) == "spam")
+    elif model == "nn_brute":
+        # turn your test vector into a 1‑D NumPy array
+        x = np.array(msg_vec)  # shape (V,)
+        best_dists = {}
+        for cls in ("spam", "ham"):
+            M = params[cls]  # shape (N_cls, V)
+            p = params["p"]
+            if p == 1:
+                # cityblock (L1)
+                dists = np.abs(M - x).sum(axis=1)
+            elif p == 2:
+                # Euclidean
+                dists = np.linalg.norm(M - x, ord=2, axis=1)
+            else:
+                # L-infinity
+                dists = np.abs(M - x).max(axis=1)
+
+            best_dists[cls] = dists.min()
+
+        # pick whichever class has the smaller distance
+        return int(min(best_dists, key=best_dists.get) == "spam")
 
 
 def naiive_bayes(
@@ -161,6 +205,7 @@ def naiive_bayes(
         i_vocab=i_vocab,
         params=params,
         cls="spam",
+        model="n_bayes",
     )
     ham_acc = test(
         start=h_stop + 1,
@@ -169,18 +214,41 @@ def naiive_bayes(
         i_vocab=i_vocab,
         params=params,
         cls="ham",
+        model="n_bayes",
     )
     print(f"spam acc: {round(spam_acc*100,2)}%")
     print(f"ham acc: {round(ham_acc*100,2)}%")
 
 
-def ro(x1: list[int], x2: list[int]):
-    pass
-
-
-def k_NN():
-
-    pass
+def k_NN(
+    vocab: dict[str, int],
+    i_vocab: dict[int, str],
+    spam_count: list[int],
+    ham_count: list[int],
+    model: str,
+    p: int,
+):
+    params = {"spam": spam_count, "ham": ham_count, "p": p}
+    spam_acc = test(
+        start=s_stop + 1,
+        dir=s_dir,
+        vocab=vocab,
+        i_vocab=i_vocab,
+        params=params,
+        cls="spam",
+        model=model,
+    )
+    ham_acc = test(
+        start=h_stop + 1,
+        dir=h_dir,
+        vocab=vocab,
+        i_vocab=i_vocab,
+        params=params,
+        cls="ham",
+        model=model,
+    )
+    print(f"spam acc: {round(spam_acc*100,2)}%")
+    print(f"ham acc: {round(ham_acc*100,2)}%")
 
 
 def test(
@@ -190,6 +258,7 @@ def test(
     i_vocab: dict[int, str],
     params: dict,
     cls: str,
+    model: str,
 ) -> float:
     files = os.listdir(dir)
     n = len(files)
@@ -203,10 +272,15 @@ def test(
                 filepath=filepath, vocab=vocab, i_vocab=i_vocab, test=True
             )
             embedding = build_bow_vector(
-                corp=sample_tokens, idx2token=i_vocab, vocab=vocab, test=True
+                corp=sample_tokens,
+                idx2token=i_vocab,
+                vocab=vocab,
+                test=True,
+                flat=True,
+                median=False,
             )
 
-            dec = classify(msg_vec=embedding, params=params)
+            dec = classify(msg_vec=embedding, params=params, model=model)
             if cls == "spam":
                 if dec == 1:
                     right += 1
@@ -231,19 +305,55 @@ def main():
         dir=h_dir, vocab=vocab, i_vocab=i_vocab, stop=h_stop
     )
 
-    spam_counts = build_bow_vector(
-        corp=spam_corp, idx2token=i_vocab, vocab=vocab, test=False
-    )
-    ham_counts = build_bow_vector(
-        corp=ham_corp, idx2token=i_vocab, vocab=vocab, test=False
-    )
+    # spam_counts_b = build_bow_vector(
+    #     corp=spam_corp,
+    #     idx2token=i_vocab,
+    #     vocab=vocab,
+    #     test=False,
+    #     model="n_bayes",
+    # )
+    # ham_counts_b = build_bow_vector(
+    #     corp=ham_corp,
+    #     idx2token=i_vocab,
+    #     vocab=vocab,
+    #     test=False,
+    #     model="n_bayes",
+    # )
 
-    naiive_bayes(
-        spam_counts=spam_counts,
-        ham_counts=ham_counts,
-        V=len(vocab),
+    # naiive_bayes(
+    #     spam_counts=spam_counts_b,
+    #     ham_counts=ham_counts_b,
+    #     V=len(vocab),
+    #     vocab=vocab,
+    #     i_vocab=i_vocab,
+    # )
+
+    spam_count_knn: list[list[int]] = build_bow_vector(
+        corp=spam_corp,
+        idx2token=i_vocab,
+        vocab=vocab,
+        test=False,
+        flat=False,
+        median=False,
+    )
+    ham_count_knn: list[list[int]] = build_bow_vector(
+        corp=ham_corp,
+        idx2token=i_vocab,
+        vocab=vocab,
+        test=False,
+        flat=False,
+        median=False,
+    )
+    train_spam_mat = np.array(spam_count_knn)  # shape (S, V)
+    train_ham_mat = np.array(ham_count_knn)  # shape (H, V)
+
+    k_NN(
         vocab=vocab,
         i_vocab=i_vocab,
+        spam_count=train_spam_mat,
+        ham_count=train_ham_mat,
+        model="nn_brute",
+        p=1,
     )
 
 
