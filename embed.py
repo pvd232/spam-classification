@@ -148,7 +148,7 @@ def classify(msg_vec: list[int], params: dict, model: str) -> int:
 
         # pick the best
         return int(max(scores, key=scores.get) == "spam")
-    elif model == "nn_brute":
+    elif model == "nn":
         # turn your test vector into a 1‑D NumPy array
         x = np.array(msg_vec)  # shape (V,)
         best_dists = {}
@@ -169,6 +169,17 @@ def classify(msg_vec: list[int], params: dict, model: str) -> int:
 
         # pick whichever class has the smaller distance
         return int(min(best_dists, key=best_dists.get) == "spam")
+    else:
+        node: TreeNode = params["root"]
+        prev = None
+        while node:
+            prev = node
+            curr = msg_vec[node.feature]
+            if curr <= node.thresh:
+                node = node.left
+            else:
+                node = node.right
+        return prev.label
 
 
 def naiive_bayes(
@@ -223,12 +234,37 @@ def naiive_bayes(
 def k_NN(
     vocab: dict[str, int],
     i_vocab: dict[int, str],
-    spam_count: list[int],
-    ham_count: list[int],
     model: str,
     p: int,
+    spam_count: list[int] = None,
+    ham_count: list[int] = None,
 ):
+    ham_acc, spam_acc = None, None
     params = {"spam": spam_count, "ham": ham_count, "p": p}
+    spam_acc = test(
+        start=s_stop + 1,
+        dir=s_dir,
+        vocab=vocab,
+        i_vocab=i_vocab,
+        params=params,
+        cls="spam",
+        model=model,
+    )
+    ham_acc = test(
+        start=h_stop + 1,
+        dir=h_dir,
+        vocab=vocab,
+        i_vocab=i_vocab,
+        params=params,
+        cls="ham",
+        model=model,
+    )
+    print(f"spam acc: {round(spam_acc*100,2)}%")
+    print(f"ham acc: {round(ham_acc*100,2)}%")
+
+
+def median_tree(vocab: dict[str, int], i_vocab: dict[int, str], model: str, root: dict):
+    params = {"root": root}
     spam_acc = test(
         start=s_stop + 1,
         dir=s_dir,
@@ -296,6 +332,59 @@ def test(
     return acc
 
 
+class TreeNode:
+    def __init__(self, feature=None, thresh=None, left=None, right=None, label=None):
+        self.feature = feature  # index j
+        self.thresh = thresh  # split threshold
+        self.left = left  # TreeNode or None
+        self.right = right  # TreeNode or None
+        self.label = label  # only for leaves
+
+
+def fit_median_tree(corp, labels, vocab, i_vocab, max_depth=10, min_size=5, depth=0):
+    # If pure or too small, make a leaf:
+    if len(set(labels)) == 1 or len(labels) <= min_size or depth >= max_depth:
+        # majority vote
+        label = max(set(labels), key=labels.count)
+        return TreeNode(label=label)
+
+    # 1) turn each doc into a BOW vector
+    vecs = build_bow_vector(corp, i_vocab, vocab, test=True, flat=False, median=False)
+
+    # 2) pick feature j (here cycle by depth)
+    j = depth % len(i_vocab)
+
+    # 3) get median thresholds for this subset
+    thresholds = build_bow_vector(
+        corp, i_vocab, vocab, test=True, flat=False, median=True
+    )
+    t_j = thresholds[j]
+
+    # 4) split the data
+    left_idx = [i for i, v in enumerate(vecs) if v[j] <= t_j]
+    right_idx = [i for i, v in enumerate(vecs) if v[j] > t_j]
+
+    # if one side empty, force leaf
+    if not left_idx or not right_idx:
+        label = max(set(labels), key=labels.count)
+        return TreeNode(label=label)
+
+    left_corp = [corp[i] for i in left_idx]
+    left_lbls = [labels[i] for i in left_idx]
+    right_corp = [corp[i] for i in right_idx]
+    right_lbls = [labels[i] for i in right_idx]
+
+    # 5) recurse
+    left_node = fit_median_tree(
+        left_corp, left_lbls, vocab, i_vocab, max_depth, min_size, depth + 1
+    )
+    right_node = fit_median_tree(
+        right_corp, right_lbls, vocab, i_vocab, max_depth, min_size, depth + 1
+    )
+
+    return TreeNode(feature=j, thresh=t_j, left=left_node, right=right_node)
+
+
 def main():
     vocab, i_vocab = {}, {}
     spam_corp: list[list[str]] = tokenize(
@@ -305,30 +394,30 @@ def main():
         dir=h_dir, vocab=vocab, i_vocab=i_vocab, stop=h_stop
     )
 
-    # spam_counts_b = build_bow_vector(
-    #     corp=spam_corp,
-    #     idx2token=i_vocab,
-    #     vocab=vocab,
-    #     test=False,
-    #     model="n_bayes",
-    # )
-    # ham_counts_b = build_bow_vector(
-    #     corp=ham_corp,
-    #     idx2token=i_vocab,
-    #     vocab=vocab,
-    #     test=False,
-    #     model="n_bayes",
-    # )
+    spam_counts_b = build_bow_vector(
+        corp=spam_corp,
+        idx2token=i_vocab,
+        vocab=vocab,
+        test=False,
+        model="n_bayes",
+    )
+    ham_counts_b = build_bow_vector(
+        corp=ham_corp,
+        idx2token=i_vocab,
+        vocab=vocab,
+        test=False,
+        model="n_bayes",
+    )
 
-    # naiive_bayes(
-    #     spam_counts=spam_counts_b,
-    #     ham_counts=ham_counts_b,
-    #     V=len(vocab),
-    #     vocab=vocab,
-    #     i_vocab=i_vocab,
-    # )
+    naiive_bayes(
+        spam_counts=spam_counts_b,
+        ham_counts=ham_counts_b,
+        V=len(vocab),
+        vocab=vocab,
+        i_vocab=i_vocab,
+    )
 
-    spam_count_knn: list[list[int]] = build_bow_vector(
+    s_cnt_knn_b: list[list[int]] = build_bow_vector(
         corp=spam_corp,
         idx2token=i_vocab,
         vocab=vocab,
@@ -336,7 +425,7 @@ def main():
         flat=False,
         median=False,
     )
-    ham_count_knn: list[list[int]] = build_bow_vector(
+    h_cnt_knn_b: list[list[int]] = build_bow_vector(
         corp=ham_corp,
         idx2token=i_vocab,
         vocab=vocab,
@@ -344,16 +433,26 @@ def main():
         flat=False,
         median=False,
     )
-    train_spam_mat = np.array(spam_count_knn)  # shape (S, V)
-    train_ham_mat = np.array(ham_count_knn)  # shape (H, V)
-
+    train_spam_mat = np.array(s_cnt_knn_b)  # shape (S, V)
+    train_ham_mat = np.array(h_cnt_knn_b)  # shape (H, V)
     k_NN(
         vocab=vocab,
         i_vocab=i_vocab,
         spam_count=train_spam_mat,
         ham_count=train_ham_mat,
-        model="nn_brute",
+        model="nn",
         p=1,
+    )
+
+    labels = [1] * len(spam_corp) + [0] * len(ham_corp)
+    all_corp = spam_corp + ham_corp
+    root = fit_median_tree(corp=all_corp, labels=labels, vocab=vocab, i_vocab=i_vocab)
+
+    median_tree(
+        vocab=vocab,
+        i_vocab=i_vocab,
+        model="tree",
+        root=root,
     )
 
 
