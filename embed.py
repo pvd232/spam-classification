@@ -13,6 +13,7 @@ from math import log
 import statistics
 import numpy as np
 import matplotlib.pyplot as plt
+from typing import Self
 
 s_dir, h_dir = os.path.join(os.curdir, "enron1/spam"), os.path.join(
     os.curdir, "enron1/ham"
@@ -215,7 +216,15 @@ def naiive_bayes(
 
 
 class KDNode:
-    def __init__(self, point, label, axis, left, right):
+
+    def __init__(
+        self,
+        point: np.ndarray,
+        label: int,
+        axis: int,
+        left: Self | None,
+        right: Self | None,
+    ):
         self.point = point  # 1D numpy array
         self.label = label  # its class (e.g. 0 or 1)
         self.axis = axis  # which coordinate we split on
@@ -226,12 +235,12 @@ class KDNode:
 def build_kdtree(
     points: np.ndarray, labels: list[int], depth: int = 0
 ) -> KDNode | None:
-    """Recursive median split KD‑tree builder."""
+    """Recursive median split KD-tree builder."""
     if len(points) == 0:
         return None
 
-    k = points.shape[1]
-    axis = depth % k
+    d = points.shape[1]
+    axis = depth % d
 
     # sort point indices by the chosen axis
     idxs = points[:, axis].argsort()
@@ -255,35 +264,47 @@ def build_kdtree(
 
 
 def kd_nearest(
-    node: KDNode, x: np.ndarray, best: tuple[int, float] | None = None, p: int = 0
+    node: KDNode, x: np.ndarray, best: tuple[int, float] | None = None, p: float = 2.0
 ) -> tuple[int, float]:
     """
-    Recursively search for the nearest neighbor of x.
-    best is a tuple(label, best_dist_so_far).
+    Recursively search for the nearest neighbor of x under L_p,
+    returning (best_label, best_dist).
     """
+
     if node is None:
         return best
 
-    # compute distance to this node
+    # 1) compute dist between x and this node’s point (a scalar)
+    diff_vec = node.point - x
     if p == 1:
-        dist = np.abs(node.point - x).sum(axis=1)
+        dist = np.abs(diff_vec).sum()
     elif p == 2:
-        dist = np.linalg.norm(node.point - x, ord=2, axis=1)
+        dist = np.linalg.norm(diff_vec, ord=2)
+    elif p == np.inf:
+        dist = np.abs(diff_vec).max()
     else:
-        dist = np.abs(node.point - x).max(axis=1)
+        # in case someone passes 3 or something
+        dist = np.linalg.norm(diff_vec, ord=p)
+
+    # 2) update best if this node is closer
     if best is None or dist < best[1]:
         best = (node.label, dist)
 
-    # pick subtree to recurse into first
+    # 3) choose which side of the plane to visit first
     axis = node.axis
-    diff = x[axis] - node.point[axis]
-    first, second = (node.left, node.right) if diff <= 0 else (node.right, node.left)
+    diff_along_axis = x[axis] - node.point[axis]
+    if diff_along_axis < 0:
+        first, second = node.left, node.right
+    else:
+        first, second = node.right, node.left
 
-    # search closer side
-    best = kd_nearest(first, x, best)
-    # if hypersphere crosses the splitting plane, search the other side
-    if abs(diff) < best[1]:
-        best = kd_nearest(second, x, best)
+    # 4) recurse into the “closer” side
+    best = kd_nearest(first, x, best, p)
+
+    # 5) check whether we need to visit the other side
+    #    (i.e. hypersphere of radius best[1] crosses the splitting plane)
+    if abs(diff_along_axis) <= best[1]:
+        best = kd_nearest(second, x, best, p)
 
     return best
 
@@ -330,32 +351,6 @@ class TreeNode:
         self.left = left
         self.right = right
         self.label = label
-
-
-def median_tree(
-    vocab: dict[str, int], i_vocab: dict[int, str], model: str, root: TreeNode
-):
-    params = {"root": root}
-    spam_acc = test(
-        start=s_stop,
-        dir=s_dir,
-        vocab=vocab,
-        i_vocab=i_vocab,
-        params=params,
-        cls="spam",
-        model=model,
-    )
-    ham_acc = test(
-        start=h_stop,
-        dir=h_dir,
-        vocab=vocab,
-        i_vocab=i_vocab,
-        params=params,
-        cls="ham",
-        model=model,
-    )
-    print(f"spam acc: {spam_acc*100:.2f}%")
-    print(f"ham acc:  {ham_acc*100:.2f}%")
 
 
 def fit_median_tree(mat, labels, max_depth=10, min_size=5, depth=0, random_split=False):
