@@ -38,9 +38,10 @@ def print_tree(node: TreeNode, depth=0):
 def H(col: list[int]) -> float:        
     # 1) ensure an integer array
     col = np.asarray(col, dtype=int)
-
+    K = np.max(col) + 1
+    
     # 2) fast bincount
-    counts = np.bincount(col, minlength=2)
+    counts = np.bincount(col, minlength=K)
     ps = counts / counts.sum()
 
     # 3) omit zero‑probability terms to avoid log(0)
@@ -49,18 +50,14 @@ def H(col: list[int]) -> float:
     # 4) compute entropy
     return -np.sum(ps_nonzero * np.log(ps_nonzero))
 
-def IG(h:float,cl_col:list[int], cr_col:list[int]) -> float:
-    n = len(cl_col) + len(cr_col)
-    w_l = len(cl_col) / n
-    w_r = len(cr_col) / n
-    return h - w_l*H(cl_col) - w_r*H(cr_col)
-
 
 def train_tree(node:TreeNode):
     n, d = node.cell.shape
 
     ys = node.cell[:, d - 1].astype(int)
-    node.label = int(np.bincount(ys, minlength=2).argmax())
+    K = np.max(ys) + 1
+
+    node.label = int(np.bincount(ys, minlength=K).argmax())
     if n == 1 or H(ys) == 0:        
         node.feature = -1
         node.leaf = True
@@ -76,41 +73,76 @@ def train_tree(node:TreeNode):
     # increment across each feature to find best IG
     f_split = None
     for j in range(d-1):
-
-        # sort data by selected feature
+        # Get list of row indices that would result from sorting the matrix by the feature col
         idxs = np.argsort(node.cell[:, j])
 
-        # extract feature col
+        # Get labels row sorted according to feature-sorted indices from prev step
+        labels_sorted = ys[idxs]
+
+        # Initialize left branch to be empty and right with all the labels
+        left_cnts = np.zeros(K, dtype=int)
+        rt_cnts = np.bincount(labels_sorted, minlength=K)
+
         col_IG = float("-inf")
         best_t = 0
 
         # BF increment across each feature value to find best thresh for feature
         col_sorted = node.cell[idxs, j]
+        # Increment through each sample
+        for i in range(n-1):
+            lbl = labels_sorted[i]
 
-        # skip feature if 0 info gain
-        if np.all(col_sorted == col_sorted[0]):
-            continue
+            # move labels from right → left
+            rt_cnts[lbl] -=1
+            left_cnts[lbl] += 1
 
-        labels_sorted = node.cell[idxs, -1]
-        
-        # Pick threshold in-between feature values to avoid ties
-        values = np.unique(col_sorted)
-        threshes = (values[:-1] + values[1:]) / 2
-        for t in threshes:                    
-            m = np.searchsorted(col_sorted, t, side="right")            
-            tmp_l_labels = labels_sorted[:m]
-            tmp_r_labels = labels_sorted[m:]
-            curr_col_IG = IG(h=curr_H,cl_col=tmp_l_labels,cr_col=tmp_r_labels)
+            # Don't split on homogenous feature values
+            if col_sorted[i] == col_sorted[i+1]:
+                continue
+
+            # Candidate threshold
+            t = (col_sorted[i] + col_sorted[i+1]) / 2
+
+            # Size of each branch
+            n_l = i+1
+            n_r = n - n_l
+
+            # Frequency
+            p_l = left_cnts / n_l
+            p_r = rt_cnts / n_r
+
+            # Boolean mask
+            nz_l = p_l > 0
+            nz_r = p_r > 0
+
+            # Entropy
+
+            H_l = -np.sum(p_l[nz_l] * np.log(p_l[nz_l]))
+            H_r = -np.sum(p_r[nz_r] * np.log(p_r[nz_r]))
+
+            w_l_IG = (n_l / n) * H_l
+            w_r_IG = (n_r / n) * H_r
+            curr_col_IG = curr_H - w_l_IG - w_r_IG
+
             if curr_col_IG > col_IG:
                 col_IG = curr_col_IG                
                 best_t = t
 
-        # compare IG of curr feature decision boundary to best feature decision boundary IG
+        # Compare IG of curr feature decision boundary to best feature decision boundary IG
         if col_IG > best_IG:
             best_IG = col_IG
-            sorted_mat = node.cell[idxs]            
-            best_left = sorted_mat[sorted_mat[:, j] <= best_t]            
-            best_right = sorted_mat[sorted_mat[:, j] > best_t]
+
+            # Take the feature‑column j of your data, but already permuted into sorted order by idxs
+            # Compare each of those sorted values to the chosen threshold and return array of booleans
+            # mask == [ True, True, True, False, False ]
+            mask = col_sorted <= best_t
+
+            # Slice matrix according to idxs up until mask
+            best_left  = node.cell[idxs[mask]]
+
+            # Slice matrix according to idxs after mask
+            # ~mask is the element‑wise NOT of the boolean array, so it picks the False positions
+            best_right = node.cell[idxs[~mask]]
             best_t_global = best_t
             f_split = j
     if best_IG <= 0 or best_left.shape[0] == 0 or best_right.shape[0] == 0:
@@ -118,19 +150,19 @@ def train_tree(node:TreeNode):
         node.leaf = True
         return
 
-        # after you’ve split into best_left and best_right:
+    # After you’ve split into best_left and best_right:
     cell_l_y = best_left[:, d-1].astype(int)
     cell_r_y = best_right[:, d-1].astype(int)
 
-    # compute majority label for left & right
+    # Compute majority label for left & right
     # c_l and c_r are arrays of counts per class in left and right child:
-    c_l = np.bincount(cell_l_y, minlength=2)
-    c_r = np.bincount(cell_r_y, minlength=2)
+    c_l = np.bincount(cell_l_y, minlength=K)
+    c_r = np.bincount(cell_r_y, minlength=K)
 
-    # total counts of each class in this node:
+    # Total counts of each class in this node:
     total = c_l + c_r
 
-    # label is the class with the larger total count
+    # Label is the class with the larger total count
     node.label = int(total.argmax())
 
     node.feature = f_split
