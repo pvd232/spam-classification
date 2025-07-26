@@ -25,7 +25,9 @@ def print_tree(node: TreeNode, depth=0):
 
     indent = "    " * depth
     # Print this node’s info; adjust to show whatever you like.
-    print(f"{indent}Node(f={node.feature}, shape={node.cell.shape}, label={node.label})")
+    print(
+        f"{indent}Node(f={node.feature}, t={node.t:.3f} shape={node.cell.shape}, label={node.label})"
+    )
 
     # Recurse on children
     if node.left or node.right:
@@ -107,16 +109,15 @@ def train_tree(node:TreeNode):
             n_l = i+1
             n_r = n - n_l
 
-            # Frequency
-            p_l = left_cnts / n_l
-            p_r = rt_cnts / n_r
+            # Frequency of each class label in each branch
+            p_l:list[float] = left_cnts / n_l
+            p_r:list[float] = rt_cnts / n_r
 
             # Boolean mask
-            nz_l = p_l > 0
-            nz_r = p_r > 0
+            nz_l:list[bool] = p_l > 0
+            nz_r: list[bool] = p_r > 0
 
             # Entropy
-
             H_l = -np.sum(p_l[nz_l] * np.log(p_l[nz_l]))
             H_r = -np.sum(p_r[nz_r] * np.log(p_r[nz_r]))
 
@@ -145,6 +146,7 @@ def train_tree(node:TreeNode):
             best_right = node.cell[idxs[~mask]]
             best_t_global = best_t
             f_split = j
+            
     if best_IG <= 0 or best_left.shape[0] == 0 or best_right.shape[0] == 0:
         node.feature = -1
         node.leaf = True
